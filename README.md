@@ -26,3 +26,31 @@ flutter run
 
 - Android 5.0+ (API 21)
 - Flutter 3.27+
+
+## Setup obbligatorio (ogni PC)
+
+Dopo `flutter pub get`, modificare manualmente questi file nella cache pub:
+
+### 1. flutter_plugin_android_lifecycle
+```
+%LOCALAPPDATA%\Pub\Cache\hosted\pub.dev\flutter_plugin_android_lifecycle-2.0.34\android\build.gradle.kts
+```
+Cambiare:
+```kotlin
+compileSdk = flutter.compileSdkVersion
+```
+in:
+```kotlin
+compileSdk = 36
+```
+
+### 2. file_picker
+```
+%LOCALAPPDATA%\Pub\Cache\hosted\pub.dev\file_picker-9.0.0\android\build.gradle
+```
+Cambiare `compileSdkVersion 34` in `compileSdkVersion 36`
+
+## Note
+
+- Le cartelle linux/, macos/, windows/ sono escluse — progetto Android only per ora
+- Il file picker usa `FileType.any` perché il filtro per estensione .dwg non è supportato da tutti i dispositivi
