@@ -6,7 +6,7 @@ plugins {
 android {
     namespace = "com.example.cad_view"
     compileSdk = 36
-    ndkVersion = flutter.ndkVersion
+    ndkVersion = "30.0.14904198"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -26,6 +26,15 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    externalNativeBuild {
+        cmake {
+         path = file("src/main/cpp/CMakeLists.txt")
+         version = "3.18.1"
+        }
+}
+
+
 }
 
 kotlin {
