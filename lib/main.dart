@@ -1,5 +1,6 @@
-import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+
 import 'viewer_screen.dart';
 
 void main() {
@@ -14,12 +15,12 @@ class CadViewApp extends StatelessWidget {
     return MaterialApp(
       title: 'CAD View',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF1565C0),
-          brightness: Brightness.dark,
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF0D0D1A),
+        colorScheme: const ColorScheme.dark(
+          primary: Colors.amber,
+          secondary: Colors.cyanAccent,
         ),
-        useMaterial3: true,
       ),
       home: const HomeScreen(),
     );
@@ -31,16 +32,33 @@ class HomeScreen extends StatelessWidget {
 
   Future<void> _openFile(BuildContext context) async {
     final result = await FilePicker.platform.pickFiles(
-      type: FileType.any,
+      type: FileType.any, // .dwg non ha MIME ufficiale
+      allowMultiple: false,
     );
 
-    if (result != null && context.mounted) {
-      final path = result.files.single.path!;
-      final name = result.files.single.name;
+    if (result == null || result.files.isEmpty) return;
+    final path = result.files.single.path;
+    if (path == null) return;
+
+    // Basic extension check
+    final ext = path.split('.').last.toLowerCase();
+    if (ext != 'dwg' && ext != 'dxf') {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Seleziona un file .dwg o .dxf'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+      return;
+    }
+
+    if (context.mounted) {
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) => ViewerScreen(filePath: path, fileName: name),
+          builder: (_) => ViewerScreen(filePath: path),
         ),
       );
     }
@@ -49,128 +67,60 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0A0E1A),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
+        child: Center(
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const SizedBox(height: 40),
-              Row(
-                children: [
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1565C0),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(
-                      Icons.architecture,
-                      color: Colors.white,
-                      size: 28,
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  const Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'CAD View',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                      Text(
-                        'Viewer & misure DWG',
-                        style: TextStyle(
-                          color: Color(0xFF7B8BB2),
-                          fontSize: 13,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              const Spacer(),
-              Center(
-                child: Column(
-                  children: [
-                    Container(
-                      width: 120,
-                      height: 120,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF111827),
-                        borderRadius: BorderRadius.circular(32),
-                        border: Border.all(
-                          color: const Color(0xFF1E3A5F),
-                          width: 1.5,
-                        ),
-                      ),
-                      child: const Icon(
-                        Icons.folder_open_outlined,
-                        color: Color(0xFF1565C0),
-                        size: 56,
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-                    const Text(
-                      'Nessun file aperto',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 20,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Apri un file DWG o DXF\nper iniziare',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: Color(0xFF7B8BB2),
-                        fontSize: 15,
-                        height: 1.5,
-                      ),
-                    ),
-                  ],
+              // Logo / icon
+              Container(
+                width: 100,
+                height: 100,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: const Color(0xFF1A1A2E),
+                  border: Border.all(color: Colors.cyanAccent.withOpacity(0.4)),
+                ),
+                child: const Icon(
+                  Icons.architecture,
+                  size: 54,
+                  color: Colors.cyanAccent,
                 ),
               ),
-              const Spacer(),
-              SizedBox(
-                width: double.infinity,
-                height: 56,
-                child: ElevatedButton.icon(
-                  onPressed: () => _openFile(context),
-                  icon: const Icon(Icons.file_open_outlined, size: 22),
-                  label: const Text(
-                    'Apri file DWG',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1565C0),
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    elevation: 0,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              const Center(
-                child: Text(
-                  'Formati supportati: DWG · DXF',
-                  style: TextStyle(
-                    color: Color(0xFF4A5568),
-                    fontSize: 12,
-                  ),
+              const SizedBox(height: 28),
+              const Text(
+                'CAD View',
+                style: TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                  letterSpacing: 2,
                 ),
               ),
               const SizedBox(height: 8),
+              const Text(
+                'Visualizza e misura file DWG / DXF',
+                style: TextStyle(color: Colors.white54, fontSize: 13),
+              ),
+              const SizedBox(height: 48),
+              FilledButton.icon(
+                onPressed: () => _openFile(context),
+                icon: const Icon(Icons.folder_open),
+                label: const Text('Apri file'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.amber,
+                  foregroundColor: Colors.black,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 36, vertical: 16),
+                  textStyle: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Formati supportati: .dwg (AC1015–AC1032) · .dxf',
+                style: TextStyle(color: Colors.white30, fontSize: 11),
+              ),
             ],
           ),
         ),
