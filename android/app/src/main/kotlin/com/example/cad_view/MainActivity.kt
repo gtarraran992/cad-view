@@ -12,13 +12,19 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+
                     "convertDwgToDxf" -> {
                         val inputPath  = call.argument<String>("inputPath")!!
                         val outputPath = call.argument<String>("outputPath")!!
-                        // CadNative.convertDwgToDxf ritorna String ("OK" / "ERROR_...")
-                        val response: String = CadNative.convertDwgToDxf(inputPath, outputPath)
-                        result.success(response)   // passa la String a Dart così com'è
+                        result.success(CadNative.convertDwgToDxf(inputPath, outputPath))
                     }
+
+                    "parseDxfToFile" -> {
+                        val dxfPath  = call.argument<String>("dxfPath")!!
+                        val jsonPath = call.argument<String>("jsonPath")!!
+                        result.success(CadNative.parseDxfToFile(dxfPath, jsonPath))
+                    }
+
                     else -> result.notImplemented()
                 }
             }

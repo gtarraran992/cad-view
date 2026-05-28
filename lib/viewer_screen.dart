@@ -1,7 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:dxf/dxf.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -9,71 +9,155 @@ import 'package:path_provider/path_provider.dart';
 import 'cad_native.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Layer color mapping (AutoCAD standard ACI index → Color)
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Layer → color palette (cycles through these)
-const _layerPalette = [
-  Color(0xFF00E5FF), // cyan
-  Color(0xFFFF4081), // pink
-  Color(0xFF69F0AE), // green
-  Color(0xFFFFD740), // amber
-  Color(0xFFE040FB), // purple
-  Color(0xFF40C4FF), // light blue
-  Color(0xFFFF6E40), // deep orange
-  Color(0xFFB2FF59), // lime
-];
-
-class _LayerStyle {
-  const _LayerStyle(this.color, this.visible);
-  final Color color;
-  final bool visible;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Data models
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _Line {
-  const _Line(this.x1, this.y1, this.x2, this.y2, this.layer);
+  const _Line(this.x1, this.y1, this.x2, this.y2, this.color, this.layer);
   final double x1, y1, x2, y2;
+  final Color  color;
   final String layer;
 }
 
-class _Polyline {
-  const _Polyline(this.vertices, this.layer, {this.closed = false});
-  final List<Offset> vertices;
+class _Poly {
+  const _Poly(this.pts, this.closed, this.color, this.layer);
+  final List<Offset> pts;
+  final bool   closed;
+  final Color  color;
   final String layer;
-  final bool closed;
 }
 
 class _Circle {
-  const _Circle(this.cx, this.cy, this.r, this.layer);
+  const _Circle(this.cx, this.cy, this.r, this.color, this.layer);
   final double cx, cy, r;
+  final Color  color;
   final String layer;
 }
 
 class _Arc {
-  const _Arc(this.cx, this.cy, this.r, this.startDeg, this.endDeg, this.layer);
-  final double cx, cy, r, startDeg, endDeg;
+  const _Arc(this.cx, this.cy, this.r, this.sa, this.ea, this.color, this.layer);
+  final double cx, cy, r, sa, ea;
+  final Color  color;
   final String layer;
 }
 
+class _LayerInfo {
+  _LayerInfo(this.color, this.visible);
+  final Color color;
+  bool  visible;
+}
+
 class _DxfData {
-  const _DxfData({
-    required this.lines,
-    required this.polylines,
-    required this.circles,
-    required this.arcs,
-    required this.bounds,
-    required this.layers,
-  });
-  final List<_Line> lines;
-  final List<_Polyline> polylines;
-  final List<_Circle> circles;
-  final List<_Arc> arcs;
-  final Rect bounds;
-  final Set<String> layers;
+  const _DxfData(this.lines, this.polys, this.circles, this.arcs,
+      this.bounds, this.layers);
+  final List<_Line>             lines;
+  final List<_Poly>             polys;
+  final List<_Circle>           circles;
+  final List<_Arc>              arcs;
+  final Rect                    bounds;
+  final Map<String, _LayerInfo> layers;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JSON → _DxfData
+// Formato: {"layers":{"name":{"color":"#RRGGBB"},...}, "entities":[...]}
+// ─────────────────────────────────────────────────────────────────────────────
+
+Color _hexColor(String? hex) {
+  if (hex == null || hex.length < 7) return Colors.white;
+  try {
+    return Color(int.parse(hex.substring(1), radix: 16) | 0xFF000000);
+  } catch (_) {
+    return Colors.white;
+  }
+}
+
+_DxfData _parseJson(String jsonStr) {
+  final root     = jsonDecode(jsonStr) as Map<String, dynamic>;
+  final layerMap = root['layers'] as Map<String, dynamic>? ?? {};
+  final entList  = root['entities'] as List<dynamic>? ?? [];
+
+  // Build layer info
+  final layers = <String, _LayerInfo>{};
+  for (final entry in layerMap.entries) {
+    final info  = entry.value as Map<String, dynamic>;
+    final color = _hexColor(info['color'] as String?);
+    layers[entry.key] = _LayerInfo(color, true);
+  }
+
+  final lines   = <_Line>[];
+  final polys   = <_Poly>[];
+  final circles = <_Circle>[];
+  final arcs    = <_Arc>[];
+
+  double minX = double.infinity,    minY = double.infinity;
+  double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
+
+  void expand(double x, double y) {
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+
+  for (final e in entList) {
+    final m     = e as Map<String, dynamic>;
+    final t     = m['t'] as String;
+    final layer = m['l'] as String? ?? '0';
+    final color = _hexColor(m['c'] as String?);
+
+    // Ensure layer appears in map (fallback white if not in table)
+    layers.putIfAbsent(layer, () => _LayerInfo(Colors.white, true));
+
+    switch (t) {
+      case 'L':
+        final x1 = (m['x1'] as num).toDouble();
+        final y1 = (m['y1'] as num).toDouble();
+        final x2 = (m['x2'] as num).toDouble();
+        final y2 = (m['y2'] as num).toDouble();
+        lines.add(_Line(x1, y1, x2, y2, color, layer));
+        expand(x1, y1); expand(x2, y2);
+
+      case 'P':
+        final raw    = m['p'] as List<dynamic>;
+        final closed = (m['cl'] as num?)?.toInt() == 1;
+        final pts    = <Offset>[];
+        for (final v in raw) {
+          final p = v as List<dynamic>;
+          final x = (p[0] as num).toDouble();
+          final y = (p[1] as num).toDouble();
+          pts.add(Offset(x, y));
+          expand(x, y);
+        }
+        if (pts.length >= 2) polys.add(_Poly(pts, closed, color, layer));
+
+      case 'C':
+        final cx = (m['cx'] as num).toDouble();
+        final cy = (m['cy'] as num).toDouble();
+        final r  = (m['r']  as num).toDouble();
+        circles.add(_Circle(cx, cy, r, color, layer));
+        expand(cx - r, cy - r); expand(cx + r, cy + r);
+
+      case 'A':
+        final cx = (m['cx'] as num).toDouble();
+        final cy = (m['cy'] as num).toDouble();
+        final r  = (m['r']  as num).toDouble();
+        final sa = (m['sa'] as num).toDouble();
+        final ea = (m['ea'] as num).toDouble();
+        arcs.add(_Arc(cx, cy, r, sa, ea, color, layer));
+        expand(cx - r, cy - r); expand(cx + r, cy + r);
+    }
+  }
+
+  if (minX == double.infinity) {
+    return _DxfData([], [], [], [], Rect.zero, layers);
+  }
+
+  final w   = maxX - minX;
+  final h   = maxY - minY;
+  final pad = math.max(w, h) * 0.02;
+  final bounds = Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
+  return _DxfData(lines, polys, circles, arcs, bounds, layers);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,76 +165,118 @@ class _DxfData {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _MeasureResult {
-  const _MeasureResult({
-    required this.p1,
-    required this.p2,
-    required this.distance,
-    required this.deltaX,
-    required this.deltaY,
-    required this.angleDeg,
-  });
+  const _MeasureResult({required this.p1, required this.p2,
+      required this.distance, required this.deltaX,
+      required this.deltaY, required this.angleDeg});
   final Offset p1, p2;
   final double distance, deltaX, deltaY, angleDeg;
 
   static _MeasureResult from(Offset p1, Offset p2) {
-    final dx = p2.dx - p1.dx;
-    final dy = p2.dy - p1.dy;
+    final dx   = p2.dx - p1.dx;
+    final dy   = p2.dy - p1.dy;
     final dist = math.sqrt(dx * dx + dy * dy);
-    var angle = math.atan2(-dy, dx) * 180.0 / math.pi;
-    if (angle < 0) angle += 360.0;
-    return _MeasureResult(
-      p1: p1, p2: p2,
-      distance: dist,
-      deltaX: dx.abs(),
-      deltaY: dy.abs(),
-      angleDeg: angle,
-    );
+    var   ang  = math.atan2(-dy, dx) * 180.0 / math.pi;
+    if (ang < 0) ang += 360.0;
+    return _MeasureResult(p1: p1, p2: p2, distance: dist,
+        deltaX: dx.abs(), deltaY: dy.abs(), angleDeg: ang);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Screen
+// Snap engine
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Intersezione segmento A-B con segmento C-D in coordinate world.
+/// Restituisce null se i segmenti non si intersecano (o sono paralleli).
+Offset? _segIntersect(Offset a, Offset b, Offset c, Offset d) {
+  final dx1 = b.dx - a.dx, dy1 = b.dy - a.dy;
+  final dx2 = d.dx - c.dx, dy2 = d.dy - c.dy;
+  final denom = dx1 * dy2 - dy1 * dx2;
+  if (denom.abs() < 1e-10) return null; // paralleli
+  final dx3 = c.dx - a.dx, dy3 = c.dy - a.dy;
+  final t = (dx3 * dy2 - dy3 * dx2) / denom;
+  final u = (dx3 * dy1 - dy3 * dx1) / denom;
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null; // fuori dai segmenti
+  return Offset(a.dx + t * dx1, a.dy + t * dy1);
+}
+
+/// Trova il punto snap più vicino al tap (in coordinate world).
+/// Considera: endpoint di linee + intersezioni linea-linea.
+/// [snapPx] è la soglia in pixel dello schermo.
+Offset _snap(Offset worldTap, _DxfData data, double scale, double snapPx) {
+  final snapWorld = snapPx / scale; // soglia in unità world
+  Offset best     = worldTap;
+  double bestDist = snapWorld;
+
+  // Raccoglie tutti i segmenti visibili come coppie di Offset world
+  final segs = <(Offset, Offset)>[];
+
+  for (final l in data.lines) {
+    if (!(data.layers[l.layer]?.visible ?? true)) continue;
+    final a = Offset(l.x1, l.y1);
+    final b = Offset(l.x2, l.y2);
+    segs.add((a, b));
+  }
+
+  for (final p in data.polys) {
+    if (!(data.layers[p.layer]?.visible ?? true)) continue;
+    for (var i = 0; i < p.pts.length - 1; i++) {
+      segs.add((p.pts[i], p.pts[i + 1]));
+    }
+    if (p.closed && p.pts.length > 2) {
+      segs.add((p.pts.last, p.pts.first));
+    }
+  }
+
+  // 1. Endpoint snap
+  for (final s in segs) {
+    for (final pt in [s.$1, s.$2]) {
+      final d = (pt - worldTap).distance;
+      if (d < bestDist) { bestDist = d; best = pt; }
+    }
+  }
+
+  // 2. Intersezione snap (solo se nessun endpoint trovato vicino)
+  // Per limitare il costo O(n²), consideriamo al massimo 300 segmenti
+  final limit = segs.length > 300 ? 300 : segs.length;
+  for (var i = 0; i < limit; i++) {
+    for (var j = i + 1; j < limit; j++) {
+      final pt = _segIntersect(segs[i].$1, segs[i].$2, segs[j].$1, segs[j].$2);
+      if (pt == null) continue;
+      final d = (pt - worldTap).distance;
+      if (d < bestDist) { bestDist = d; best = pt; }
+    }
+  }
+
+  return best;
+}
+
+
 
 class ViewerScreen extends StatefulWidget {
   const ViewerScreen({super.key, required this.filePath});
   final String filePath;
-
-  @override
-  State<ViewerScreen> createState() => _ViewerScreenState();
+  @override State<ViewerScreen> createState() => _ViewerScreenState();
 }
 
 class _ViewerScreenState extends State<ViewerScreen> {
   _DxfData? _data;
-  String? _error;
-  bool _loading = true;
+  String?   _error;
+  bool      _loading = true;
 
-  // viewport
-  double _scale = 1.0;
-  Offset _offset = Offset.zero;
-  double _baseScale = 1.0;
-  Offset _baseOffset = Offset.zero;
-  Offset _focalStart = Offset.zero;
+  double _scale = 1.0, _baseScale = 1.0;
+  Offset _offset = Offset.zero, _baseOffset = Offset.zero, _focalStart = Offset.zero;
 
-  // layers visibility
-  final Map<String, _LayerStyle> _layerStyles = {};
-
-  // measure
   bool _measureMode = false;
-  Offset? _measureP1;
-  Offset? _measureP2;
-  _MeasureResult? _measureResult;
-
-  // panels
+  Offset? _p1, _p2;
+  _MeasureResult? _result;
   bool _showLayers = false;
-
-  // ── init ──────────────────────────────────────────────────────────────────
 
   @override
   void initState() {
     super.initState();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    _convertAndParse();
+    _load();
   }
 
   @override
@@ -160,320 +286,129 @@ class _ViewerScreenState extends State<ViewerScreen> {
     super.dispose();
   }
 
-  // ── parse ─────────────────────────────────────────────────────────────────
-
-  Future<void> _convertAndParse() async {
+  Future<void> _load() async {
     try {
-      final tmpDir = await getTemporaryDirectory();
-      final dxfPath = '${tmpDir.path}/output.dxf';
+      final tmp     = await getTemporaryDirectory();
+      final dxfPath  = '${tmp.path}/output.dxf';
+      final jsonPath = '${tmp.path}/entities.json';
 
       final ext = widget.filePath.split('.').last.toLowerCase();
       if (ext == 'dwg') {
-        final ok = await CadNative.convertDwgToDxf(widget.filePath, dxfPath);
-        if (!ok) throw Exception('Conversione DWG fallita');
+        await CadNative.convertDwgToDxf(widget.filePath, dxfPath);
       } else {
         await File(widget.filePath).copy(dxfPath);
       }
 
-      final dxfContent = await File(dxfPath).readAsString();
-      final dxf = DXF.fromString(dxfContent);
+      await CadNative.parseDxfToFile(dxfPath, jsonPath);
+      final json = await File(jsonPath).readAsString();
+      final data = _parseJson(json);
 
-      final lines = <_Line>[];
-      final polylines = <_Polyline>[];
-      final circles = <_Circle>[];
-      final arcs = <_Arc>[];
-      final layerSet = <String>{};
+      if (data.bounds == Rect.zero) throw Exception('Nessuna entità trovata');
 
-      double minX = double.infinity, minY = double.infinity;
-      double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
-
-      void expand(double x, double y) {
-        if (x < minX) minX = x;
-        if (y < minY) minY = y;
-        if (x > maxX) maxX = x;
-        if (y > maxY) maxY = y;
-      }
-
-      for (final e in dxf.entities) {
-        // dxf 3.x: AcDbEntity espone "layerName", non "layer"
-        final layer = (e as dynamic).layerName as String? ?? '0';
-        layerSet.add(layer);
-
-        if (e is AcDbLine) {
-          lines.add(_Line(e.x, e.y, e.x1, e.y1, layer));
-          expand(e.x, e.y);
-          expand(e.x1, e.y1);
-        } else if (e is AcDbPolyline) {
-          final verts = <Offset>[];
-          for (final v in e.vertices) {
-            final x = (v[0] as num).toDouble();
-            final y = (v[1] as num).toDouble();
-            verts.add(Offset(x, y));
-            expand(x, y);
-          }
-          if (verts.length >= 2) {
-            polylines.add(_Polyline(verts, layer, closed: e.isClosed));
-          }
-        } else if (e is AcDbCircle) {
-          // dxf 3.x: campo "radius" (non "r")
-          circles.add(_Circle(e.x, e.y, e.radius, layer));
-          expand(e.x - e.radius, e.y - e.radius);
-          expand(e.x + e.radius, e.y + e.radius);
-        } else if (e is AcDbArc) {
-          // dxf 3.x: campo "radius" (non "r")
-          arcs.add(_Arc(e.x, e.y, e.radius, e.startAngle, e.endAngle, layer));
-          expand(e.x - e.radius, e.y - e.radius);
-          expand(e.x + e.radius, e.y + e.radius);
-        }
-      }
-
-      if (minX == double.infinity) {
-        throw Exception('Nessuna entità geometrica trovata nel file DXF');
-      }
-
-      // Add 2% padding to bounds
-      final w = maxX - minX;
-      final h = maxY - minY;
-      final pad = math.max(w, h) * 0.02;
-      final bounds = Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
-
-      // Build layer styles
-      final styles = <String, _LayerStyle>{};
-      var idx = 0;
-      for (final name in layerSet) {
-        final color = _layerPalette[idx % _layerPalette.length];
-        styles[name] = _LayerStyle(color, true);
-        idx++;
-      }
-
-      setState(() {
-        _data = _DxfData(
-          lines: lines,
-          polylines: polylines,
-          circles: circles,
-          arcs: arcs,
-          bounds: bounds,
-          layers: layerSet,
-        );
-        _layerStyles.addAll(styles);
-        _loading = false;
-      });
-
+      setState(() { _data = data; _loading = false; });
       WidgetsBinding.instance.addPostFrameCallback((_) => _fitToScreen());
     } catch (e) {
-      setState(() {
-        _error = e.toString();
-        _loading = false;
-      });
+      setState(() { _error = e.toString(); _loading = false; });
     }
   }
 
-  // ── fit to screen ─────────────────────────────────────────────────────────
-
   void _fitToScreen() {
     if (_data == null || !mounted) return;
-    final size = MediaQuery.of(context).size;
+    final sz     = MediaQuery.of(context).size;
     final bounds = _data!.bounds;
-    const padding = 40.0;
-    final availW = size.width - padding * 2;
-    final availH = size.height - padding * 2 - kToolbarHeight;
-
-    final scaleX = availW / bounds.width.clamp(1.0, double.infinity);
-    final scaleY = availH / bounds.height.clamp(1.0, double.infinity);
-    final scale = math.min(scaleX, scaleY);
-
-    final cx = (bounds.left + bounds.right) / 2;
-    final cy = (bounds.top + bounds.bottom) / 2;
-
+    const pad    = 40.0;
+    final sX = (sz.width  - pad * 2) / bounds.width.clamp(1.0, double.infinity);
+    final sY = (sz.height - pad * 2 - kToolbarHeight) / bounds.height.clamp(1.0, double.infinity);
+    final s  = math.min(sX, sY);
+    final cx = (bounds.left + bounds.right)  / 2;
+    final cy = (bounds.top  + bounds.bottom) / 2;
     setState(() {
-      _scale = scale;
-      _offset = Offset(
-        size.width / 2 - cx * scale,
-        size.height / 2 + cy * scale,
-      );
+      _scale  = s;
+      _offset = Offset(sz.width / 2 - cx * s, sz.height / 2 + cy * s);
     });
   }
 
-  // ── coordinate transforms ─────────────────────────────────────────────────
-
-  Offset _screenToWorld(Offset s) => Offset(
-        (s.dx - _offset.dx) / _scale,
-        -((s.dy - _offset.dy) / _scale),
-      );
-
-  // ── gestures ──────────────────────────────────────────────────────────────
+  Offset _s2w(Offset s) => Offset(
+      (s.dx - _offset.dx) / _scale, -((s.dy - _offset.dy) / _scale));
 
   void _onScaleStart(ScaleStartDetails d) {
-    _baseScale = _scale;
-    _baseOffset = _offset;
-    _focalStart = d.focalPoint;
+    _baseScale = _scale; _baseOffset = _offset; _focalStart = d.focalPoint;
   }
-
-  void _onScaleUpdate(ScaleUpdateDetails d) {
-    setState(() {
-      _scale = (_baseScale * d.scale).clamp(0.001, 100000.0);
-      _offset = _baseOffset +
-          (d.focalPoint - _focalStart) +
-          (_focalStart - _baseOffset) * (1 - d.scale);
-    });
-  }
-
-  void _onTapDown(TapDownDetails d) {
+  void _onScaleUpdate(ScaleUpdateDetails d) => setState(() {
+    _scale  = (_baseScale * d.scale).clamp(0.001, 100000.0);
+    _offset = _baseOffset + (d.focalPoint - _focalStart)
+              + (_focalStart - _baseOffset) * (1 - d.scale);
+  });
+  void _onTap(TapDownDetails d) {
     if (!_measureMode) return;
-    final world = _screenToWorld(d.localPosition);
+    final raw      = _s2w(d.localPosition);
+    // Snap a endpoint/intersezione entro 20px schermo
+    final snapped  = _snap(raw, _data!, _scale, 20.0);
     setState(() {
-      if (_measureP1 == null || _measureResult != null) {
-        _measureP1 = world;
-        _measureP2 = null;
-        _measureResult = null;
-      } else {
-        _measureP2 = world;
-        _measureResult = _MeasureResult.from(_measureP1!, world);
-      }
+      if (_p1 == null || _result != null) { _p1 = snapped; _p2 = null; _result = null; }
+      else { _p2 = snapped; _result = _MeasureResult.from(_p1!, snapped); }
     });
   }
-
-  void _clearMeasure() => setState(() {
-        _measureP1 = null;
-        _measureP2 = null;
-        _measureResult = null;
-      });
-
-  // ── layer color ───────────────────────────────────────────────────────────
-
-  Color _layerColor(String layer) =>
-      _layerStyles[layer]?.color ?? _layerPalette[0];
-
-  bool _layerVisible(String layer) =>
-      _layerStyles[layer]?.visible ?? true;
-
-  // ── build ─────────────────────────────────────────────────────────────────
+  void _clearMeasure() => setState(() { _p1 = _p2 = null; _result = null; });
 
   @override
   Widget build(BuildContext context) {
-    final bottomPad = MediaQuery.of(context).padding.bottom;
-    final topPad    = MediaQuery.of(context).padding.top;
-
+    final bp = MediaQuery.of(context).padding.bottom;
     return Scaffold(
       backgroundColor: const Color(0xFF0A0A14),
-      // Use transparent AppBar so we control the safe area manually
-      extendBodyBehindAppBar: false,
       appBar: AppBar(
         backgroundColor: const Color(0xFF12122A),
-        foregroundColor: Colors.white,
-        elevation: 0,
-        title: Text(
-          widget.filePath.split('/').last,
-          style: const TextStyle(fontSize: 13, color: Colors.white70),
-          overflow: TextOverflow.ellipsis,
-        ),
+        foregroundColor: Colors.white, elevation: 0,
+        title: Text(widget.filePath.split('/').last,
+            style: const TextStyle(fontSize: 13, color: Colors.white70),
+            overflow: TextOverflow.ellipsis),
         actions: [
-          // Layer panel toggle
           if (_data != null)
             IconButton(
               icon: Icon(Icons.layers,
                   color: _showLayers ? Colors.amber : Colors.white54),
-              tooltip: 'Layer',
-              onPressed: () => setState(() => _showLayers = !_showLayers),
-            ),
-          // Measure toggle
+              onPressed: () => setState(() => _showLayers = !_showLayers)),
           IconButton(
             icon: Icon(Icons.straighten,
                 color: _measureMode ? Colors.amber : Colors.white54),
-            tooltip: _measureMode ? 'Esci misura' : 'Misura',
             onPressed: () => setState(() {
               _measureMode = !_measureMode;
               if (!_measureMode) _clearMeasure();
-            }),
-          ),
-          // Fit
+            })),
           IconButton(
             icon: const Icon(Icons.fit_screen, color: Colors.white54),
-            tooltip: 'Adatta',
-            onPressed: _fitToScreen,
-          ),
-        ],
-      ),
-      body: _loading
-          ? const _LoadingView()
-          : _error != null
-              ? _ErrorView(message: _error!)
-              : Stack(
-                  children: [
-                    // ── canvas ──────────────────────────────────────────
-                    GestureDetector(
-                      onScaleStart: _onScaleStart,
-                      onScaleUpdate: _onScaleUpdate,
-                      onTapDown: _measureMode ? _onTapDown : null,
-                      child: CustomPaint(
-                        painter: _DxfPainter(
-                          data: _data!,
-                          scale: _scale,
-                          offset: _offset,
-                          layerColor: _layerColor,
-                          layerVisible: _layerVisible,
-                          measureP1: _measureP1,
-                          measureP2: _measureP2,
-                          measureMode: _measureMode,
-                        ),
-                        child: const SizedBox.expand(),
-                      ),
-                    ),
-
-                    // ── measure hint ────────────────────────────────────
-                    if (_measureMode && _measureResult == null)
-                      Positioned(
-                        top: 12,
-                        left: 0, right: 0,
-                        child: Center(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: Colors.black87,
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                  color: Colors.amber.withOpacity(0.5)),
-                            ),
-                            child: Text(
-                              _measureP1 == null
-                                  ? '📍 Tocca il primo punto'
-                                  : '📍 Tocca il secondo punto',
-                              style: const TextStyle(
-                                  color: Colors.amber, fontSize: 13),
-                            ),
-                          ),
-                        ),
-                      ),
-
-                    // ── layer panel ─────────────────────────────────────
-                    if (_showLayers && _data != null)
-                      Positioned(
-                        top: 8, right: 8,
-                        child: _LayerPanel(
-                          layers: _data!.layers.toList()..sort(),
-                          styles: _layerStyles,
-                          onToggle: (layer) => setState(() {
-                            final s = _layerStyles[layer]!;
-                            _layerStyles[layer] =
-                                _LayerStyle(s.color, !s.visible);
-                          }),
-                        ),
-                      ),
-
-                    // ── measure result panel ────────────────────────────
-                    if (_measureResult != null)
-                      Positioned(
-                        left: 0, right: 0, bottom: 0,
-                        child: _MeasurePanel(
-                          result: _measureResult!,
-                          onClear: _clearMeasure,
-                          bottomPad: bottomPad,
-                        ),
-                      ),
-                  ],
-                ),
-    );
+            onPressed: _fitToScreen),
+        ]),
+      body: _loading ? const _LoadingView()
+          : _error  != null ? _ErrorView(msg: _error!)
+          : Stack(children: [
+              GestureDetector(
+                onScaleStart: _onScaleStart, onScaleUpdate: _onScaleUpdate,
+                onTapDown: _measureMode ? _onTap : null,
+                child: CustomPaint(
+                  painter: _Painter(data: _data!, scale: _scale, offset: _offset,
+                      measureP1: _p1, measureP2: _p2, measureMode: _measureMode),
+                  child: const SizedBox.expand())),
+              if (_measureMode && _result == null)
+                Positioned(top: 12, left: 0, right: 0,
+                  child: Center(child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(color: Colors.black87,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.amber.withOpacity(0.5))),
+                    child: Text(_p1 == null ? '📍 Tocca il primo punto'
+                                            : '📍 Tocca il secondo punto',
+                        style: const TextStyle(color: Colors.amber, fontSize: 13))))),
+              if (_showLayers && _data != null)
+                Positioned(top: 8, right: 8,
+                  child: _LayerPanel(layers: _data!.layers,
+                      onToggle: (l) => setState(() =>
+                          _data!.layers[l]!.visible = !_data!.layers[l]!.visible))),
+              if (_result != null)
+                Positioned(left: 0, right: 0, bottom: 0,
+                  child: _MeasurePanel(result: _result!, onClear: _clearMeasure,
+                      bottomPad: bp)),
+            ]));
   }
 }
 
@@ -481,140 +416,96 @@ class _ViewerScreenState extends State<ViewerScreen> {
 // Painter
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _DxfPainter extends CustomPainter {
-  _DxfPainter({
-    required this.data,
-    required this.scale,
-    required this.offset,
-    required this.layerColor,
-    required this.layerVisible,
-    this.measureP1,
-    this.measureP2,
-    this.measureMode = false,
-  });
-
+class _Painter extends CustomPainter {
+  const _Painter({required this.data, required this.scale, required this.offset,
+      this.measureP1, this.measureP2, this.measureMode = false});
   final _DxfData data;
-  final double scale;
-  final Offset offset;
-  final Color Function(String) layerColor;
-  final bool Function(String) layerVisible;
-  final Offset? measureP1;
-  final Offset? measureP2;
-  final bool measureMode;
+  final double   scale;
+  final Offset   offset;
+  final Offset?  measureP1, measureP2;
+  final bool     measureMode;
 
-  Offset _w2s(double wx, double wy) =>
-      Offset(wx * scale + offset.dx, -wy * scale + offset.dy);
-  Offset _w2sO(Offset w) => _w2s(w.dx, w.dy);
+  Offset _w(double x, double y) =>
+      Offset(x * scale + offset.dx, -y * scale + offset.dy);
+  Offset _wo(Offset o) => _w(o.dx, o.dy);
 
-  Paint _paint(String layer) => Paint()
-    ..color = layerColor(layer)
-    ..strokeWidth = (1.4 / scale).clamp(0.4, 4.0)
-    ..style = PaintingStyle.stroke
-    ..strokeCap = StrokeCap.round
-    ..strokeJoin = StrokeJoin.round;
+  // Spessore adattivo: sottile come in AutoCAD, non esplode con lo zoom
+  double get _lw => (0.5 / scale).clamp(0.2, 1.0);
+
+  Paint _p(Color c) => Paint()
+    ..color       = c
+    ..strokeWidth = _lw
+    ..style       = PaintingStyle.stroke
+    ..strokeCap   = StrokeCap.round
+    ..strokeJoin  = StrokeJoin.round;
+
+  bool _vis(String layer) => data.layers[layer]?.visible ?? true;
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Background
-    canvas.drawRect(
-      Rect.fromLTWH(0, 0, size.width, size.height),
-      Paint()..color = const Color(0xFF0A0A14),
-    );
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height),
+        Paint()..color = const Color(0xFF0A0A14));
 
-    // Lines
-    for (final l in data.lines) {
-      if (!layerVisible(l.layer)) continue;
-      canvas.drawLine(_w2s(l.x1, l.y1), _w2s(l.x2, l.y2), _paint(l.layer));
+    for (final e in data.lines) {
+      if (!_vis(e.layer)) continue;
+      canvas.drawLine(_w(e.x1, e.y1), _w(e.x2, e.y2), _p(e.color));
     }
 
-    // Polylines
-    for (final poly in data.polylines) {
-      if (!layerVisible(poly.layer)) continue;
-      if (poly.vertices.isEmpty) continue;
+    for (final e in data.polys) {
+      if (!_vis(e.layer) || e.pts.isEmpty) continue;
       final path = Path();
-      final first = _w2sO(poly.vertices.first);
-      path.moveTo(first.dx, first.dy);
-      for (var i = 1; i < poly.vertices.length; i++) {
-        final p = _w2sO(poly.vertices[i]);
+      final f = _wo(e.pts.first);
+      path.moveTo(f.dx, f.dy);
+      for (var i = 1; i < e.pts.length; i++) {
+        final p = _wo(e.pts[i]);
         path.lineTo(p.dx, p.dy);
       }
-      if (poly.closed) path.close();
-      canvas.drawPath(path, _paint(poly.layer));
+      if (e.closed) path.close();
+      canvas.drawPath(path, _p(e.color));
     }
 
-    // Circles
-    for (final c in data.circles) {
-      if (!layerVisible(c.layer)) continue;
-      final center = _w2s(c.cx, c.cy);
-      final radius = c.r * scale;
-      canvas.drawCircle(center, radius, _paint(c.layer));
+    for (final e in data.circles) {
+      if (!_vis(e.layer)) continue;
+      canvas.drawCircle(_w(e.cx, e.cy), e.r * scale, _p(e.color));
     }
 
-    // Arcs
-    for (final a in data.arcs) {
-      if (!layerVisible(a.layer)) continue;
-      final center = _w2s(a.cx, a.cy);
-      final radius = a.r * scale;
-      final rect = Rect.fromCircle(center: center, radius: radius);
-      // DXF angles are CCW from X; Flutter drawArc is CW from 3 o'clock
-      final startRad = -a.startDeg * math.pi / 180.0;
-      var sweepDeg = a.endDeg - a.startDeg;
-      if (sweepDeg <= 0) sweepDeg += 360;
-      final sweepRad = -sweepDeg * math.pi / 180.0;
-      canvas.drawArc(rect, startRad, sweepRad, false, _paint(a.layer));
+    for (final e in data.arcs) {
+      if (!_vis(e.layer)) continue;
+      var sweep = e.ea - e.sa;
+      if (sweep <= 0) sweep += 360;
+      canvas.drawArc(
+        Rect.fromCircle(center: _w(e.cx, e.cy), radius: e.r * scale),
+        -e.sa  * math.pi / 180.0,
+        -sweep * math.pi / 180.0,
+        false, _p(e.color));
     }
 
-    // Measure overlay
     if (measureMode) _drawMeasure(canvas);
   }
 
   void _drawMeasure(Canvas canvas) {
     if (measureP1 == null) return;
-    final s1 = _w2sO(measureP1!);
-
-    // Point 1 dot
-    canvas.drawCircle(s1, 7, Paint()..color = Colors.amber);
-    canvas.drawCircle(
-        s1, 7, Paint()..color = Colors.black..style = PaintingStyle.stroke..strokeWidth = 1.5);
-
+    final s1 = _wo(measureP1!);
+    // Punto snap: cerchio vuoto + punto pieno
+    canvas.drawCircle(s1, 9, Paint()..color=Colors.amber..style=PaintingStyle.stroke..strokeWidth=1.5);
+    canvas.drawCircle(s1, 3, Paint()..color=Colors.amber);
     if (measureP2 == null) return;
-    final s2 = _w2sO(measureP2!);
-
-    // Point 2 dot
-    canvas.drawCircle(s2, 7, Paint()..color = Colors.amber);
-    canvas.drawCircle(
-        s2, 7, Paint()..color = Colors.black..style = PaintingStyle.stroke..strokeWidth = 1.5);
-
-    // Main line
-    canvas.drawLine(s1, s2,
-        Paint()
-          ..color = Colors.amber
-          ..strokeWidth = 1.8
-          ..style = PaintingStyle.stroke);
-
-    // Delta X guide (red, horizontal)
+    final s2  = _wo(measureP2!);
+    canvas.drawCircle(s2, 9, Paint()..color=Colors.amber..style=PaintingStyle.stroke..strokeWidth=1.5);
+    canvas.drawCircle(s2, 3, Paint()..color=Colors.amber);
+    canvas.drawLine(s1, s2, Paint()
+      ..color=Colors.amber..strokeWidth=1.5..style=PaintingStyle.stroke);
     final corner = Offset(s2.dx, s1.dy);
-    canvas.drawLine(s1, corner,
-        Paint()
-          ..color = Colors.redAccent.withOpacity(0.7)
-          ..strokeWidth = 1.2
-          ..style = PaintingStyle.stroke);
-
-    // Delta Y guide (green, vertical)
-    canvas.drawLine(corner, s2,
-        Paint()
-          ..color = Colors.greenAccent.withOpacity(0.7)
-          ..strokeWidth = 1.2
-          ..style = PaintingStyle.stroke);
+    canvas.drawLine(s1, corner, Paint()
+      ..color=Colors.redAccent.withOpacity(0.7)..strokeWidth=1.0..style=PaintingStyle.stroke);
+    canvas.drawLine(corner, s2, Paint()
+      ..color=Colors.greenAccent.withOpacity(0.7)..strokeWidth=1.0..style=PaintingStyle.stroke);
   }
 
   @override
-  bool shouldRepaint(_DxfPainter old) =>
-      old.scale != scale ||
-      old.offset != offset ||
-      old.measureP1 != measureP1 ||
-      old.measureP2 != measureP2 ||
-      old.measureMode != measureMode;
+  bool shouldRepaint(_Painter o) =>
+      o.scale!=scale||o.offset!=offset||
+      o.measureP1!=measureP1||o.measureP2!=measureP2||o.measureMode!=measureMode;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -622,112 +513,68 @@ class _DxfPainter extends CustomPainter {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _LayerPanel extends StatelessWidget {
-  const _LayerPanel({
-    required this.layers,
-    required this.styles,
-    required this.onToggle,
-  });
-  final List<String> layers;
-  final Map<String, _LayerStyle> styles;
+  const _LayerPanel({required this.layers, required this.onToggle});
+  final Map<String, _LayerInfo> layers;
   final void Function(String) onToggle;
 
   @override
   Widget build(BuildContext context) {
+    final names = layers.keys.toList()..sort();
     return Container(
-      width: 180,
-      constraints: const BoxConstraints(maxHeight: 320),
-      decoration: BoxDecoration(
-        color: const Color(0xE6121228),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white12),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(12, 10, 12, 6),
-            child: Row(
-              children: [
-                Icon(Icons.layers, size: 14, color: Colors.white54),
-                SizedBox(width: 6),
-                Text('Layer',
-                    style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold)),
-              ],
-            ),
-          ),
-          const Divider(height: 1, color: Colors.white12),
-          Flexible(
-            child: ListView.builder(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              shrinkWrap: true,
-              itemCount: layers.length,
-              itemBuilder: (_, i) {
-                final name = layers[i];
-                final style = styles[name]!;
-                return InkWell(
-                  onTap: () => onToggle(name),
-                  child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 12, height: 12,
-                          decoration: BoxDecoration(
-                            color: style.visible
-                                ? style.color
-                                : Colors.transparent,
-                            borderRadius: BorderRadius.circular(3),
-                            border: Border.all(color: style.color, width: 1.5),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            name,
-                            style: TextStyle(
-                              color: style.visible
-                                  ? Colors.white
-                                  : Colors.white30,
-                              fontSize: 11,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        if (!style.visible)
-                          const Icon(Icons.visibility_off,
-                              size: 12, color: Colors.white24),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-    );
+      width: 190,
+      constraints: const BoxConstraints(maxHeight: 340),
+      decoration: BoxDecoration(color: const Color(0xEE121228),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.white12)),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        const Padding(padding: EdgeInsets.fromLTRB(12,10,12,6),
+          child: Row(children: [
+            Icon(Icons.layers, size:14, color:Colors.white54),
+            SizedBox(width:6),
+            Text('Layer', style:TextStyle(color:Colors.white70, fontSize:12,
+                fontWeight:FontWeight.bold)),
+          ])),
+        const Divider(height:1, color:Colors.white12),
+        Flexible(child: ListView.builder(
+          padding: const EdgeInsets.symmetric(vertical:4),
+          shrinkWrap: true,
+          itemCount: names.length,
+          itemBuilder: (_, i) {
+            final name = names[i];
+            final info = layers[name]!;
+            return InkWell(
+              onTap: () => onToggle(name),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal:12, vertical:5),
+                child: Row(children: [
+                  Container(width:12, height:12,
+                    decoration: BoxDecoration(
+                      color: info.visible ? info.color : Colors.transparent,
+                      borderRadius: BorderRadius.circular(3),
+                      border: Border.all(color: info.color, width:1.5))),
+                  const SizedBox(width:8),
+                  Expanded(child: Text(name, style: TextStyle(
+                    color: info.visible ? Colors.white : Colors.white30,
+                    fontSize:11), overflow: TextOverflow.ellipsis)),
+                  if (!info.visible)
+                    const Icon(Icons.visibility_off, size:12, color:Colors.white24),
+                ])));
+          })),
+      ]));
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Measure Panel — respects navigation bar insets
+// Measure Panel
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _MeasurePanel extends StatelessWidget {
-  const _MeasurePanel({
-    required this.result,
-    required this.onClear,
-    required this.bottomPad,
-  });
+  const _MeasurePanel({required this.result, required this.onClear, required this.bottomPad});
   final _MeasureResult result;
   final VoidCallback onClear;
   final double bottomPad;
 
-  String _fmt(double v) {
+  String _f(double v) {
     if (v.abs() >= 10000) return v.toStringAsFixed(0);
     if (v.abs() >= 100)   return v.toStringAsFixed(1);
     if (v.abs() >= 1)     return v.toStringAsFixed(3);
@@ -735,87 +582,45 @@ class _MeasurePanel extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: const BoxDecoration(
-        color: Color(0xFF12122A),
-        border: Border(top: BorderSide(color: Colors.amber, width: 1.5)),
-      ),
-      padding: EdgeInsets.fromLTRB(16, 12, 16, 12 + bottomPad),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Header
-          Row(
-            children: [
-              const Icon(Icons.straighten, color: Colors.amber, size: 16),
-              const SizedBox(width: 8),
-              const Text('Misura',
-                  style: TextStyle(
-                      color: Colors.amber,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 13,
-                      letterSpacing: 0.5)),
-              const Spacer(),
-              GestureDetector(
-                onTap: onClear,
-                child: const Icon(Icons.close,
-                    color: Colors.white38, size: 20),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          // 4 metrics
-          Row(
-            children: [
-              _Tile('Distanza', _fmt(result.distance), Colors.white),
-              _Tile('Delta X',  _fmt(result.deltaX),   Colors.redAccent),
-              _Tile('Delta Y',  _fmt(result.deltaY),   Colors.greenAccent),
-              _Tile('Angolo',
-                  '${result.angleDeg.toStringAsFixed(2)}°',
-                  Colors.cyanAccent),
-            ],
-          ),
-          const SizedBox(height: 8),
-          // Coordinates
-          Text(
-            'P1 (${_fmt(result.p1.dx)}, ${_fmt(result.p1.dy)})   '
-            'P2 (${_fmt(result.p2.dx)}, ${_fmt(result.p2.dy)})',
-            style: const TextStyle(color: Colors.white30, fontSize: 10),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => Container(
+    decoration: const BoxDecoration(color: Color(0xFF12122A),
+        border: Border(top: BorderSide(color: Colors.amber, width: 1.5))),
+    padding: EdgeInsets.fromLTRB(16, 12, 16, 12 + bottomPad),
+    child: Column(mainAxisSize: MainAxisSize.min, children: [
+      Row(children: [
+        const Icon(Icons.straighten, color: Colors.amber, size: 16),
+        const SizedBox(width: 8),
+        const Text('Misura', style: TextStyle(color: Colors.amber,
+            fontWeight: FontWeight.bold, fontSize: 13, letterSpacing: 0.5)),
+        const Spacer(),
+        GestureDetector(onTap: onClear,
+            child: const Icon(Icons.close, color: Colors.white38, size: 20)),
+      ]),
+      const SizedBox(height: 12),
+      Row(children: [
+        _Tile('Distanza', _f(result.distance), Colors.white),
+        _Tile('Delta X',  _f(result.deltaX),   Colors.redAccent),
+        _Tile('Delta Y',  _f(result.deltaY),   Colors.greenAccent),
+        _Tile('Angolo', '${result.angleDeg.toStringAsFixed(2)}°', Colors.cyanAccent),
+      ]),
+      const SizedBox(height: 8),
+      Text('P1 (${_f(result.p1.dx)}, ${_f(result.p1.dy)})   '
+           'P2 (${_f(result.p2.dx)}, ${_f(result.p2.dy)})',
+          style: const TextStyle(color: Colors.white30, fontSize: 10),
+          textAlign: TextAlign.center),
+    ]));
 }
 
 class _Tile extends StatelessWidget {
   const _Tile(this.label, this.value, this.color);
-  final String label, value;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: Column(
-        children: [
-          Text(label,
-              style:
-                  const TextStyle(color: Colors.white38, fontSize: 10)),
-          const SizedBox(height: 3),
-          Text(value,
-              style: TextStyle(
-                  color: color,
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  fontFamily: 'monospace'),
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center),
-        ],
-      ),
-    );
-  }
+  final String label, value; final Color color;
+  @override Widget build(BuildContext context) => Expanded(child: Column(children: [
+    Text(label, style: const TextStyle(color: Colors.white38, fontSize: 10)),
+    const SizedBox(height: 3),
+    Text(value, style: TextStyle(color: color, fontSize: 14,
+        fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+        overflow: TextOverflow.ellipsis, textAlign: TextAlign.center),
+  ]));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -824,32 +629,20 @@ class _Tile extends StatelessWidget {
 
 class _LoadingView extends StatelessWidget {
   const _LoadingView();
-  @override
-  Widget build(BuildContext context) => const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircularProgressIndicator(color: Colors.amber),
-            SizedBox(height: 16),
-            Text('Caricamento…',
-                style: TextStyle(color: Colors.white54, fontSize: 13)),
-          ],
-        ),
-      );
+  @override Widget build(BuildContext context) => const Center(child: Column(
+    mainAxisSize: MainAxisSize.min, children: [
+      CircularProgressIndicator(color: Colors.amber),
+      SizedBox(height: 16),
+      Text('Caricamento…', style: TextStyle(color: Colors.white54, fontSize: 13)),
+    ]));
 }
 
 class _ErrorView extends StatelessWidget {
-  const _ErrorView({required this.message});
-  final String message;
-  @override
-  Widget build(BuildContext context) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Text(
-            'Errore:\n$message',
-            style: const TextStyle(color: Colors.redAccent, fontSize: 13),
-            textAlign: TextAlign.center,
-          ),
-        ),
-      );
+  const _ErrorView({required this.msg});
+  final String msg;
+  @override Widget build(BuildContext context) => Center(child: Padding(
+    padding: const EdgeInsets.all(32),
+    child: Text('Errore:\n$msg',
+        style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+        textAlign: TextAlign.center)));
 }

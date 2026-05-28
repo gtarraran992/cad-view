@@ -81,14 +81,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.9"
-  dxf:
-    dependency: "direct main"
-    description:
-      name: dxf
-      sha256: "4955e955b3f471b5441237f0b9b95d4955f094e8fe6b90f5810ac9feb30a712b"
-      url: "https://pub.dev"
-    source: hosted
-    version: "3.1.3"
   fake_async:
     dependency: transitive
     description:
