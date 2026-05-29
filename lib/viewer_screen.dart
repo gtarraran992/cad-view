@@ -435,7 +435,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     decoration: BoxDecoration(color: Colors.black87,
                         borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: Colors.amber.withOpacity(0.5))),
+                        border: Border.all(color: Colors.amber.withValues(alpha: 0.5))),
                     child: Text(_p1 == null ? '📍 Tocca il primo punto'
                                             : '📍 Tocca il secondo punto',
                         style: const TextStyle(color: Colors.amber, fontSize: 13))))),
@@ -616,9 +616,9 @@ class _Painter extends CustomPainter {
       ..color=Colors.amber..strokeWidth=1.5..style=PaintingStyle.stroke);
     final corner = Offset(s2.dx, s1.dy);
     canvas.drawLine(s1, corner, Paint()
-      ..color=Colors.redAccent.withOpacity(0.7)..strokeWidth=1.0..style=PaintingStyle.stroke);
+      ..color=Colors.redAccent.withValues(alpha: 0.7)..strokeWidth=1.0..style=PaintingStyle.stroke);
     canvas.drawLine(corner, s2, Paint()
-      ..color=Colors.greenAccent.withOpacity(0.7)..strokeWidth=1.0..style=PaintingStyle.stroke);
+      ..color=Colors.greenAccent.withValues(alpha: 0.7)..strokeWidth=1.0..style=PaintingStyle.stroke);
   }
 
   @override

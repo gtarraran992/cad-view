@@ -79,7 +79,7 @@ class HomeScreen extends StatelessWidget {
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: const Color(0xFF1A1A2E),
-                  border: Border.all(color: Colors.cyanAccent.withOpacity(0.4)),
+                  border: Border.all(color: Colors.cyanAccent.withValues(alpha: 0.4)),
                 ),
                 child: const Icon(
                   Icons.architecture,
