@@ -41,6 +41,22 @@ class _Arc {
   final String layer;
 }
 
+class _TextEnt {
+  const _TextEnt(this.x, this.y, this.text, this.height, this.angleDeg,
+      this.alignH, this.alignV, this.color, this.layer);
+  final double x, y, height, angleDeg;
+  final int    alignH, alignV; // 0=L/Baseline,1=C/Bottom,2=R/Middle,3=Top
+  final String text, layer;
+  final Color  color;
+}
+
+class _DimEnt {
+  const _DimEnt(this.tx, this.ty, this.text, this.angleDeg, this.color, this.layer);
+  final double tx, ty, angleDeg;
+  final String text, layer;
+  final Color  color;
+}
+
 class _LayerInfo {
   _LayerInfo(this.color, this.visible);
   final Color color;
@@ -49,11 +65,13 @@ class _LayerInfo {
 
 class _DxfData {
   const _DxfData(this.lines, this.polys, this.circles, this.arcs,
-      this.bounds, this.layers);
+      this.texts, this.dims, this.bounds, this.layers);
   final List<_Line>             lines;
   final List<_Poly>             polys;
   final List<_Circle>           circles;
   final List<_Arc>              arcs;
+  final List<_TextEnt>          texts;
+  final List<_DimEnt>           dims;
   final Rect                    bounds;
   final Map<String, _LayerInfo> layers;
 }
@@ -77,18 +95,18 @@ _DxfData _parseJson(String jsonStr) {
   final layerMap = root['layers'] as Map<String, dynamic>? ?? {};
   final entList  = root['entities'] as List<dynamic>? ?? [];
 
-  // Build layer info
   final layers = <String, _LayerInfo>{};
   for (final entry in layerMap.entries) {
     final info  = entry.value as Map<String, dynamic>;
-    final color = _hexColor(info['color'] as String?);
-    layers[entry.key] = _LayerInfo(color, true);
+    layers[entry.key] = _LayerInfo(_hexColor(info['color'] as String?), true);
   }
 
   final lines   = <_Line>[];
   final polys   = <_Poly>[];
   final circles = <_Circle>[];
   final arcs    = <_Arc>[];
+  final texts   = <_TextEnt>[];
+  final dims    = <_DimEnt>[];
 
   double minX = double.infinity,    minY = double.infinity;
   double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
@@ -105,8 +123,6 @@ _DxfData _parseJson(String jsonStr) {
     final t     = m['t'] as String;
     final layer = m['l'] as String? ?? '0';
     final color = _hexColor(m['c'] as String?);
-
-    // Ensure layer appears in map (fallback white if not in table)
     layers.putIfAbsent(layer, () => _LayerInfo(Colors.white, true));
 
     switch (t) {
@@ -146,18 +162,42 @@ _DxfData _parseJson(String jsonStr) {
         final ea = (m['ea'] as num).toDouble();
         arcs.add(_Arc(cx, cy, r, sa, ea, color, layer));
         expand(cx - r, cy - r); expand(cx + r, cy + r);
+
+      case 'T':
+      case 'M':
+        final x  = (m['x']  as num).toDouble();
+        final y  = (m['y']  as num).toDouble();
+        final h  = (m['h']  as num).toDouble();
+        final a  = (m['a']  as num? ?? 0).toDouble();
+        final ah = (m['ah'] as num? ?? 0).toInt();
+        final av = (m['av'] as num? ?? 0).toInt();
+        final s  = m['s']  as String? ?? '';
+        if (s.isNotEmpty && h > 0) {
+          texts.add(_TextEnt(x, y, s, h, a, ah, av, color, layer));
+          expand(x, y);
+        }
+
+      case 'D':
+        final tx = (m['tx'] as num).toDouble();
+        final ty = (m['ty'] as num).toDouble();
+        final s  = m['s']  as String? ?? '';
+        final a  = (m['a'] as num? ?? 0).toDouble();
+        if (s.isNotEmpty) {
+          dims.add(_DimEnt(tx, ty, s, a, color, layer));
+          expand(tx, ty);
+        }
     }
   }
 
   if (minX == double.infinity) {
-    return _DxfData([], [], [], [], Rect.zero, layers);
+    return _DxfData([], [], [], [], [], [], Rect.zero, layers);
   }
 
   final w   = maxX - minX;
   final h   = maxY - minY;
   final pad = math.max(w, h) * 0.02;
   final bounds = Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
-  return _DxfData(lines, polys, circles, arcs, bounds, layers);
+  return _DxfData(lines, polys, circles, arcs, texts, dims, bounds, layers);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -480,7 +520,86 @@ class _Painter extends CustomPainter {
         false, _p(e.color));
     }
 
+    // Testi e MText
+    for (final e in data.texts) {
+      if (!_vis(e.layer)) continue;
+      _drawText(canvas, e);
+    }
+
+    // Quote (solo testo, le linee di quota vengono dalle polilinee/linee)
+    for (final e in data.dims) {
+      if (!_vis(e.layer)) continue;
+      _drawDim(canvas, e);
+    }
+
     if (measureMode) _drawMeasure(canvas);
+  }
+
+  void _drawText(Canvas canvas, _TextEnt e) {
+    // Altezza testo in pixel schermo
+    final px = e.height * scale;
+    if (px < 2.0) return; // troppo piccolo, non disegnare
+
+    final tp = TextPainter(
+      text: TextSpan(
+        text: e.text,
+        style: TextStyle(
+          color:    e.color,
+          fontSize: px.clamp(6.0, 300.0),
+          height:   1.0,
+          fontFamily: 'monospace',
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      textAlign: switch (e.alignH) {
+        1 => TextAlign.center,
+        2 => TextAlign.right,
+        _ => TextAlign.left,
+      },
+    )..layout();
+
+    final screen = _w(e.x, e.y);
+    canvas.save();
+    canvas.translate(screen.dx, screen.dy);
+    // Rotazione: DXF angolo CCW in gradi, Flutter CW in radianti → negate
+    if (e.angleDeg != 0) {
+      canvas.rotate(-e.angleDeg * math.pi / 180.0);
+    }
+
+    // Offset verticale per alignment (DXF Y up → flip)
+    double dy = 0;
+    switch (e.alignV) {
+      case 3: dy = 0;          break; // Top    → origine in alto
+      case 2: dy = -tp.height / 2; break; // Middle
+      case 1: dy = -tp.height; break; // Bottom
+      default: dy = -tp.height; break; // Baseline ≈ bottom
+    }
+
+    tp.paint(canvas, Offset(0, dy));
+    canvas.restore();
+  }
+
+  void _drawDim(Canvas canvas, _DimEnt e) {
+    // Usa dimensione fissa in pixel (le quote hanno height=0 spesso)
+    const px = 11.0;
+    final tp = TextPainter(
+      text: TextSpan(
+        text: e.text == '<>' ? '' : e.text,
+        style: TextStyle(color: e.color, fontSize: px, height: 1.0),
+      ),
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.center,
+    )..layout();
+
+    if (tp.width == 0) return;
+    final screen = _w(e.tx, e.ty);
+    canvas.save();
+    canvas.translate(screen.dx, screen.dy);
+    if (e.angleDeg != 0) {
+      canvas.rotate(-e.angleDeg * math.pi / 180.0);
+    }
+    tp.paint(canvas, Offset(-tp.width / 2, -tp.height / 2));
+    canvas.restore();
   }
 
   void _drawMeasure(Canvas canvas) {
